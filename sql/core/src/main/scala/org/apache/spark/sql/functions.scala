@@ -21,6 +21,7 @@ import scala.collection.JavaConverters._
 import scala.language.implicitConversions
 import scala.reflect.runtime.universe.{typeTag, TypeTag}
 import scala.util.Try
+import scala.util.control.NonFatal
 
 import org.apache.spark.annotation.{Experimental, InterfaceStability}
 import org.apache.spark.sql.catalyst.ScalaReflection
@@ -91,15 +92,24 @@ object functions {
    * @group normal_funcs
    * @since 1.3.0
    */
-  def lit(literal: Any): Column = {
-    literal match {
-      case c: Column => return c
-      case s: Symbol => return new ColumnName(literal.asInstanceOf[Symbol].name)
-      case _ =>  // continue
-    }
+  def lit(literal: Any): Column = typedLit(literal)
 
-    val literalExpr = Literal(literal)
-    Column(literalExpr)
+  /**
+   * Creates a [[Column]] of literal value.
+   *
+   * The passed in object is returned directly if it is already a [[Column]].
+   * If the object is a Scala Symbol, it is converted into a [[Column]] also.
+   * Otherwise, a new [[Column]] is created to represent the literal value.
+   * The difference between this function and [[lit]] is that this function
+   * can handle parameterized scala types e.g.: List, Seq and Map.
+   *
+   * @group normal_funcs
+   * @since 2.2.0
+   */
+  def typedLit[T : TypeTag](literal: T): Column = literal match {
+    case c: Column => c
+    case s: Symbol => new ColumnName(s.name)
+    case _ => Column(Literal.create(literal))
   }
 
   //////////////////////////////////////////////////////////////////////////////////////////////
@@ -1852,7 +1862,7 @@ object functions {
   def rint(columnName: String): Column = rint(Column(columnName))
 
   /**
-   * Returns the value of the column `e` rounded to 0 decimal places.
+   * Returns the value of the column `e` rounded to 0 decimal places with HALF_UP round mode.
    *
    * @group math_funcs
    * @since 1.5.0
@@ -1860,8 +1870,8 @@ object functions {
   def round(e: Column): Column = round(e, 0)
 
   /**
-   * Round the value of `e` to `scale` decimal places if `scale` is greater than or equal to 0
-   * or at integral part when `scale` is less than 0.
+   * Round the value of `e` to `scale` decimal places with HALF_UP round mode
+   * if `scale` is greater than or equal to 0 or at integral part when `scale` is less than 0.
    *
    * @group math_funcs
    * @since 1.5.0
@@ -2182,8 +2192,8 @@ object functions {
   }
 
   /**
-   * Formats numeric column x to a format like '#,###,###.##', rounded to d decimal places,
-   * and returns the result as a string column.
+   * Formats numeric column x to a format like '#,###,###.##', rounded to d decimal places
+   * with HALF_EVEN round mode, and returns the result as a string column.
    *
    * If d is 0, the result has no decimal point or fractional part.
    * If d is less than 0, the result will be null.
@@ -2481,10 +2491,10 @@ object functions {
    * Converts a date/timestamp/string to a value of string in the format specified by the date
    * format given by the second argument.
    *
-   * A pattern could be for instance `dd.MM.yyyy` and could return a string like '18.03.1993'. All
-   * pattern letters of `java.text.SimpleDateFormat` can be used.
+   * A pattern `dd.MM.yyyy` would return a string like `18.03.1993`.
+   * All pattern letters of `java.text.SimpleDateFormat` can be used.
    *
-   * @note Use when ever possible specialized functions like [[year]]. These benefit from a
+   * @note Use specialized functions like [[year]] whenever possible as they benefit from a
    * specialized implementation.
    *
    * @group datetime_funcs
@@ -2637,7 +2647,11 @@ object functions {
   }
 
   /**
-   * Gets current Unix timestamp in seconds.
+   * Returns the current Unix timestamp (in seconds).
+   *
+   * @note All calls of `unix_timestamp` within the same query return the same value
+   * (i.e. the current timestamp is calculated at the start of query evaluation).
+   *
    * @group datetime_funcs
    * @since 1.5.0
    */
@@ -2647,7 +2661,9 @@ object functions {
 
   /**
    * Converts time string in format yyyy-MM-dd HH:mm:ss to Unix timestamp (in seconds),
-   * using the default timezone and the default locale, return null if fail.
+   * using the default timezone and the default locale.
+   * Returns `null` if fails.
+   *
    * @group datetime_funcs
    * @since 1.5.0
    */
@@ -2656,13 +2672,15 @@ object functions {
   }
 
   /**
-   * Convert time string with given pattern
-   * (see [http://docs.oracle.com/javase/tutorial/i18n/format/simpleDateFormat.html])
-   * to Unix time stamp (in seconds), return null if fail.
+   * Converts time string with given pattern to Unix timestamp (in seconds).
+   * Returns `null` if fails.
+   *
+   * @see <a href="http://docs.oracle.com/javase/tutorial/i18n/format/simpleDateFormat.html">
+   * Customizing Formats</a>
    * @group datetime_funcs
    * @since 1.5.0
    */
-  def unix_timestamp(s: Column, p: String): Column = withExpr {UnixTimestamp(s.expr, Literal(p)) }
+  def unix_timestamp(s: Column, p: String): Column = withExpr { UnixTimestamp(s.expr, Literal(p)) }
 
   /**
    * Convert time string to a Unix timestamp (in seconds).
@@ -2887,7 +2905,7 @@ object functions {
   //////////////////////////////////////////////////////////////////////////////////////////////
 
   /**
-   * Returns true if the array contains `value`
+   * Returns null if the array is null, true if the array contains `value`, and false otherwise.
    * @group collection_funcs
    * @since 1.5.0
    */
@@ -2958,14 +2976,30 @@ object functions {
    *
    * @param e a string column containing JSON data.
    * @param schema the schema to use when parsing the json string
-   * @param options options to control how the json is parsed. accepts the same options and the
+   * @param options options to control how the json is parsed. Accepts the same options as the
    *                json data source.
    *
    * @group collection_funcs
    * @since 2.1.0
    */
-  def from_json(e: Column, schema: StructType, options: Map[String, String]): Column = withExpr {
-    JsonToStruct(schema, options, e.expr)
+  def from_json(e: Column, schema: StructType, options: Map[String, String]): Column =
+    from_json(e, schema.asInstanceOf[DataType], options)
+
+  /**
+   * (Scala-specific) Parses a column containing a JSON string into a `StructType` or `ArrayType`
+   * of `StructType`s with the specified schema. Returns `null`, in the case of an unparseable
+   * string.
+   *
+   * @param e a string column containing JSON data.
+   * @param schema the schema to use when parsing the json string
+   * @param options options to control how the json is parsed. accepts the same options and the
+   *                json data source.
+   *
+   * @group collection_funcs
+   * @since 2.2.0
+   */
+  def from_json(e: Column, schema: DataType, options: Map[String, String]): Column = withExpr {
+    JsonToStructs(schema, options, e.expr)
   }
 
   /**
@@ -2984,6 +3018,22 @@ object functions {
     from_json(e, schema, options.asScala.toMap)
 
   /**
+   * (Java-specific) Parses a column containing a JSON string into a `StructType` or `ArrayType`
+   * of `StructType`s with the specified schema. Returns `null`, in the case of an unparseable
+   * string.
+   *
+   * @param e a string column containing JSON data.
+   * @param schema the schema to use when parsing the json string
+   * @param options options to control how the json is parsed. accepts the same options and the
+   *                json data source.
+   *
+   * @group collection_funcs
+   * @since 2.2.0
+   */
+  def from_json(e: Column, schema: DataType, options: java.util.Map[String, String]): Column =
+    from_json(e, schema, options.asScala.toMap)
+
+  /**
    * Parses a column containing a JSON string into a `StructType` with the specified schema.
    * Returns `null`, in the case of an unparseable string.
    *
@@ -2997,24 +3047,45 @@ object functions {
     from_json(e, schema, Map.empty[String, String])
 
   /**
-   * Parses a column containing a JSON string into a `StructType` with the specified schema.
-   * Returns `null`, in the case of an unparseable string.
+   * Parses a column containing a JSON string into a `StructType` or `ArrayType` of `StructType`s
+   * with the specified schema. Returns `null`, in the case of an unparseable string.
    *
    * @param e a string column containing JSON data.
-   * @param schema the schema to use when parsing the json string as a json string
+   * @param schema the schema to use when parsing the json string
+   *
+   * @group collection_funcs
+   * @since 2.2.0
+   */
+  def from_json(e: Column, schema: DataType): Column =
+    from_json(e, schema, Map.empty[String, String])
+
+  /**
+   * Parses a column containing a JSON string into a `StructType` or `ArrayType` of `StructType`s
+   * with the specified schema. Returns `null`, in the case of an unparseable string.
+   *
+   * @param e a string column containing JSON data.
+   * @param schema the schema to use when parsing the json string as a json string. In Spark 2.1,
+   *               the user-provided schema has to be in JSON format. Since Spark 2.2, the DDL
+   *               format is also supported for the schema.
    *
    * @group collection_funcs
    * @since 2.1.0
    */
-  def from_json(e: Column, schema: String, options: java.util.Map[String, String]): Column =
-    from_json(e, DataType.fromJson(schema).asInstanceOf[StructType], options)
-
+  def from_json(e: Column, schema: String, options: java.util.Map[String, String]): Column = {
+    val dataType = try {
+      DataType.fromJson(schema)
+    } catch {
+      case NonFatal(_) => StructType.fromDDL(schema)
+    }
+    from_json(e, dataType, options)
+  }
 
   /**
-   * (Scala-specific) Converts a column containing a `StructType` into a JSON string with the
-   * specified schema. Throws an exception, in the case of an unsupported type.
+   * (Scala-specific) Converts a column containing a `StructType` or `ArrayType` of `StructType`s
+   * into a JSON string with the specified schema. Throws an exception, in the case of an
+   * unsupported type.
    *
-   * @param e a struct column.
+   * @param e a column containing a struct or array of the structs.
    * @param options options to control how the struct column is converted into a json string.
    *                accepts the same options and the json data source.
    *
@@ -3022,14 +3093,15 @@ object functions {
    * @since 2.1.0
    */
   def to_json(e: Column, options: Map[String, String]): Column = withExpr {
-    StructToJson(options, e.expr)
+    StructsToJson(options, e.expr)
   }
 
   /**
-   * (Java-specific) Converts a column containing a `StructType` into a JSON string with the
-   * specified schema. Throws an exception, in the case of an unsupported type.
+   * (Java-specific) Converts a column containing a `StructType` or `ArrayType` of `StructType`s
+   * into a JSON string with the specified schema. Throws an exception, in the case of an
+   * unsupported type.
    *
-   * @param e a struct column.
+   * @param e a column containing a struct or array of the structs.
    * @param options options to control how the struct column is converted into a json string.
    *                accepts the same options and the json data source.
    *
@@ -3040,10 +3112,10 @@ object functions {
     to_json(e, options.asScala.toMap)
 
   /**
-   * Converts a column containing a `StructType` into a JSON string with the
-   * specified schema. Throws an exception, in the case of an unsupported type.
+   * Converts a column containing a `StructType` or `ArrayType` of `StructType`s into a JSON string
+   * with the specified schema. Throws an exception, in the case of an unsupported type.
    *
-   * @param e a struct column.
+   * @param e a column containing a struct or array of the structs.
    *
    * @group collection_funcs
    * @since 2.1.0

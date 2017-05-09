@@ -43,16 +43,6 @@ private[util] sealed trait BaseReadWrite {
   private var optionSparkSession: Option[SparkSession] = None
 
   /**
-   * Sets the Spark SQLContext to use for saving/loading.
-   */
-  @Since("1.6.0")
-  @deprecated("Use session instead, This method will be removed in 2.2.0.", "2.0.0")
-  def context(sqlContext: SQLContext): this.type = {
-    optionSparkSession = Option(sqlContext.sparkSession)
-    this
-  }
-
-  /**
    * Sets the Spark Session to use for saving/loading.
    */
   @Since("2.0.0")
@@ -104,8 +94,9 @@ abstract class MLWriter extends BaseReadWrite with Logging {
         // TODO: Revert back to the original content if save is not successful.
         fs.delete(qualifiedOutputPath, true)
       } else {
-        throw new IOException(
-          s"Path $path already exists. Please use write.overwrite().save(path) to overwrite it.")
+        throw new IOException(s"Path $path already exists. To overwrite it, " +
+          s"please use write.overwrite().save(path) for Scala and use " +
+          s"write().overwrite().save(path) for Java and Python.")
       }
     }
     saveImpl(path)
@@ -129,9 +120,6 @@ abstract class MLWriter extends BaseReadWrite with Logging {
 
   // override for Java compatibility
   override def session(sparkSession: SparkSession): this.type = super.session(sparkSession)
-
-  // override for Java compatibility
-  override def context(sqlContext: SQLContext): this.type = super.session(sqlContext.sparkSession)
 }
 
 /**
@@ -187,9 +175,6 @@ abstract class MLReader[T] extends BaseReadWrite {
 
   // override for Java compatibility
   override def session(sparkSession: SparkSession): this.type = super.session(sparkSession)
-
-  // override for Java compatibility
-  override def context(sqlContext: SQLContext): this.type = super.session(sqlContext.sparkSession)
 }
 
 /**

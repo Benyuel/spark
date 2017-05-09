@@ -80,7 +80,7 @@ private[deploy] class Master(
   private val waitingDrivers = new ArrayBuffer[DriverInfo]
   private var nextDriverNumber = 0
 
-  Utils.checkHost(address.host, "Expected hostname")
+  Utils.checkHost(address.host)
 
   private val masterMetricsSystem = MetricsSystem.createMetricsSystem("master", conf, securityMgr)
   private val applicationMetricsSystem = MetricsSystem.createMetricsSystem("applications", conf,
@@ -1045,7 +1045,7 @@ private[deploy] object Master extends Logging {
     val rpcEnv = RpcEnv.create(SYSTEM_NAME, host, port, conf, securityMgr)
     val masterEndpoint = rpcEnv.setupEndpoint(ENDPOINT_NAME,
       new Master(rpcEnv, rpcEnv.address, webUiPort, securityMgr, conf))
-    val portsResponse = masterEndpoint.askWithRetry[BoundPortsResponse](BoundPortsRequest)
+    val portsResponse = masterEndpoint.askSync[BoundPortsResponse](BoundPortsRequest)
     (rpcEnv, portsResponse.webUIPort, portsResponse.restPort)
   }
 }
