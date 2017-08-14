@@ -19,7 +19,6 @@ package org.apache.spark.sql.execution.datasources.parquet
 
 import java.nio.{ByteBuffer, ByteOrder}
 import java.util
-import java.util.TimeZone
 
 import scala.collection.JavaConverters.mapAsJavaMapConverter
 
@@ -59,7 +58,7 @@ private[parquet] class ParquetWriteSupport extends WriteSupport[InternalRow] wit
   private var schema: StructType = _
 
   // `ValueWriter`s for all fields of the schema
-  private var rootFieldWriters: Seq[ValueWriter] = _
+  private var rootFieldWriters: Array[ValueWriter] = _
 
   // The Parquet `RecordConsumer` to which all `InternalRow`s are written
   private var recordConsumer: RecordConsumer = _
@@ -76,9 +75,6 @@ private[parquet] class ParquetWriteSupport extends WriteSupport[InternalRow] wit
   // Reusable byte array used to write decimal values
   private val decimalBuffer = new Array[Byte](minBytesForPrecision(DecimalType.MAX_PRECISION))
 
-  private var storageTz: TimeZone = _
-  private var sessionTz: TimeZone = _
-
   override def init(configuration: Configuration): WriteContext = {
     val schemaString = configuration.get(ParquetWriteSupport.SPARK_ROW_SCHEMA)
     this.schema = StructType.fromString(schemaString)
@@ -94,20 +90,7 @@ private[parquet] class ParquetWriteSupport extends WriteSupport[InternalRow] wit
     }
 
 
-    this.rootFieldWriters = schema.map(_.dataType).map(makeWriter)
-    // If the table has a timezone property, apply the correct conversions.  See SPARK-12297.
-    val sessionTzString = configuration.get(SQLConf.SESSION_LOCAL_TIMEZONE.key)
-    sessionTz = if (sessionTzString == null || sessionTzString == "") {
-      TimeZone.getDefault()
-    } else {
-      TimeZone.getTimeZone(sessionTzString)
-    }
-    val storageTzString = configuration.get(ParquetFileFormat.PARQUET_TIMEZONE_TABLE_PROPERTY)
-    storageTz = if (storageTzString == null || storageTzString == "") {
-      sessionTz
-    } else {
-      TimeZone.getTimeZone(storageTzString)
-    }
+    this.rootFieldWriters = schema.map(_.dataType).map(makeWriter).toArray[ValueWriter]
 
     val messageType = new ParquetSchemaConverter(configuration).convert(schema)
     val metadata = Map(ParquetReadSupport.SPARK_METADATA_KEY -> schemaString).asJava
@@ -133,7 +116,7 @@ private[parquet] class ParquetWriteSupport extends WriteSupport[InternalRow] wit
   }
 
   private def writeFields(
-      row: InternalRow, schema: StructType, fieldWriters: Seq[ValueWriter]): Unit = {
+      row: InternalRow, schema: StructType, fieldWriters: Array[ValueWriter]): Unit = {
     var i = 0
     while (i < row.numFields) {
       if (!row.isNullAt(i)) {
@@ -195,13 +178,7 @@ private[parquet] class ParquetWriteSupport extends WriteSupport[InternalRow] wit
 
           // NOTE: Starting from Spark 1.5, Spark SQL `TimestampType` only has microsecond
           // precision.  Nanosecond parts of timestamp values read from INT96 are simply stripped.
-          val rawMicros = row.getLong(ordinal)
-          val adjustedMicros = if (sessionTz.getID() == storageTz.getID()) {
-            rawMicros
-          } else {
-            DateTimeUtils.convertTz(rawMicros, storageTz, sessionTz)
-          }
-          val (julianDay, timeOfDayNanos) = DateTimeUtils.toJulianDay(adjustedMicros)
+          val (julianDay, timeOfDayNanos) = DateTimeUtils.toJulianDay(row.getLong(ordinal))
           val buf = ByteBuffer.wrap(timestampBuffer)
           buf.order(ByteOrder.LITTLE_ENDIAN).putLong(timeOfDayNanos).putInt(julianDay)
           recordConsumer.addBinary(Binary.fromReusedByteArray(timestampBuffer))
@@ -215,7 +192,7 @@ private[parquet] class ParquetWriteSupport extends WriteSupport[InternalRow] wit
         makeDecimalWriter(precision, scale)
 
       case t: StructType =>
-        val fieldWriters = t.map(_.dataType).map(makeWriter)
+        val fieldWriters = t.map(_.dataType).map(makeWriter).toArray[ValueWriter]
         (row: SpecializedGetters, ordinal: Int) =>
           consumeGroup {
             writeFields(row.getStruct(ordinal, t.length), t, fieldWriters)

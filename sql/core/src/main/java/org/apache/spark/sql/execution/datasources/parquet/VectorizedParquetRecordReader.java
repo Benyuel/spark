@@ -21,7 +21,6 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.parquet.column.ColumnDescriptor;
@@ -96,8 +95,6 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
    */
   private boolean returnColumnarBatch;
 
-  private Configuration conf;
-
   /**
    * The default config on whether columnarBatch should be offheap.
    */
@@ -110,7 +107,6 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
   public void initialize(InputSplit inputSplit, TaskAttemptContext taskAttemptContext)
       throws IOException, InterruptedException, UnsupportedOperationException {
     super.initialize(inputSplit, taskAttemptContext);
-    this.conf = taskAttemptContext.getConfiguration();
     initializeInternal();
   }
 
@@ -158,12 +154,6 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
     return (float) rowsReturned / totalRowCount;
   }
 
-  /**
-   * Returns the ColumnarBatch object that will be used for all rows returned by this reader.
-   * This object is reused. Calling this enables the vectorized reader. This should be called
-   * before any calls to nextKeyValue/nextBatch.
-   */
-
   // Creates a columnar batch that includes the schema from the data files and the additional
   // partition columns appended to the end of the batch.
   // For example, if the data contains two columns, with 2 partition columns:
@@ -208,12 +198,17 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
     initBatch(DEFAULT_MEMORY_MODE, partitionColumns, partitionValues);
   }
 
+  /**
+   * Returns the ColumnarBatch object that will be used for all rows returned by this reader.
+   * This object is reused. Calling this enables the vectorized reader. This should be called
+   * before any calls to nextKeyValue/nextBatch.
+   */
   public ColumnarBatch resultBatch() {
     if (columnarBatch == null) initBatch();
     return columnarBatch;
   }
 
-  /*
+  /**
    * Can be called before any rows are returned to enable returning columnar batches directly.
    */
   public void enableReturningBatches() {
@@ -241,9 +236,7 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
   }
 
   private void initializeInternal() throws IOException, UnsupportedOperationException {
-    /**
-     * Check that the requested schema is supported.
-     */
+    // Check that the requested schema is supported.
     missingColumns = new boolean[requestedSchema.getFieldCount()];
     for (int i = 0; i < requestedSchema.getFieldCount(); ++i) {
       Type t = requestedSchema.getFields().get(i);
@@ -281,7 +274,7 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
     for (int i = 0; i < columns.size(); ++i) {
       if (missingColumns[i]) continue;
       columnReaders[i] = new VectorizedColumnReader(columns.get(i),
-          pages.getPageReader(columns.get(i)), conf);
+          pages.getPageReader(columns.get(i)));
     }
     totalCountLoadedSoFar += pages.getRowCount();
   }
